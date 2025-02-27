@@ -1,0 +1,60 @@
+# 环境变量文件
+.env
+.env.local
+.env.*.local
+
+# 依赖目录
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# 日志文件
+logs/
+*.log
+
+# 运行时数据
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# 目录用于缓存
+.npm/
+.eslintcache
+.node_repl_history
+
+# 系统文件
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 编辑器目录和文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 临时文件
+tmp/
+temp/
+
+# 构建输出
+dist/
+build/
+out/
+
+# 调试文件
+.nyc_output/
+coverage/
+
+# 其他
+.cache/
+.project
+.settings/
+.classpath
+.factorypath 
