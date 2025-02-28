@@ -41,7 +41,7 @@ const CONFIG = {
     RETRY: {
         MAX_ATTEMPTS: 2//重试次数
     },
-    SHOW_THINKING: process.env.SHOW_THINKING === 'true',
+    SHOW_THINKING: process.env.SHOW_THINKING == undefined ? true : process.env.SHOW_THINKING == 'true',
     IS_THINKING: false,
     IS_IMG_GEN: false,
     IS_IMG_GEN2: false,
@@ -99,11 +99,19 @@ async function initialization() {
         return;
     }
     const ssoArray = process.env.SSO.split(',');
-    ssoArray.forEach((sso) => {
-        tokenManager.addToken(`sso-rw=${sso};sso=${sso}`);
-    });
-    Logger.info(`成功加载令牌: ${JSON.stringify(tokenManager.getAllTokens(), null, 2)}`, 'Server');
-    Logger.info(`令牌加载完成，共加载: ${tokenManager.getAllTokens().length}个令牌`, 'Server');
+    const concurrencyLimit = 3;
+    for (let i = 0; i < ssoArray.length; i += concurrencyLimit) {
+        const batch = ssoArray.slice(i, i + concurrencyLimit);
+        const batchPromises = batch.map(sso =>
+            tokenManager.addToken(`sso-rw=${sso};sso=${sso}`)
+        );
+
+        await Promise.all(batchPromises);
+        Logger.info(`已加载令牌: ${i} 个`, 'Server');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    Logger.info(`令牌加载完成: ${JSON.stringify(tokenManager.getAllTokens(), null, 2)}`, 'Server');
+    Logger.info(`共加载: ${tokenManager.getAllTokens().length}个令牌`, 'Server');
     if (CONFIG.API.IS_TEMP_GROK2) {
         await tempCookieManager.ensureCookies();
         CONFIG.API.TEMP_COOKIE = tempCookieManager.cookies[tempCookieManager.currentIndex];
@@ -115,12 +123,13 @@ class AuthTokenManager {
     constructor() {
         this.tokenModelMap = {};
         this.expiredTokens = new Set();
+        this.tokenStatusMap = {};
 
         // 定义模型请求频率限制和过期时间
         this.modelConfig = {
             "grok-2": {
-                RequestFrequency: 20,
-                ExpirationTime: 2 * 60 * 60 * 1000 // 2小时
+                RequestFrequency: 30,
+                ExpirationTime: 1 * 60 * 60 * 1000 // 1小时
             },
             "grok-3": {
                 RequestFrequency: 20,
@@ -136,39 +145,160 @@ class AuthTokenManager {
             }
         };
         this.tokenResetSwitch = false;
+        this.tokenResetTimer = null;
     }
+    async fetchGrokStats(token, modelName) {
+        let requestKind = 'DEFAULT';
+        if (modelName == 'grok-2' || modelName == 'grok-3') {
+            requestKind = 'DEFAULT';
+        } else if (modelName == 'grok-3-deepsearch') {
+            requestKind = 'DEEPSEARCH';
+        } else if (modelName == 'grok-3-reasoning') {
+            requestKind = 'REASONING';
+        }
+        const response = await fetch('https://grok.com/rest/rate-limits', {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                'Cookie': token,
+            },
+            body: JSON.stringify({
+                "requestKind": requestKind,
+                "modelName": modelName == 'grok-2' ? 'grok-latest' : "grok-3"
+            })
+        });
 
-    addToken(token) {
-        Object.keys(this.modelConfig).forEach(model => {
+        if (response.status != 200) {
+            return 0;
+        }
+        const data = await response.json();
+        return data.remainingQueries;
+    }
+    async addToken(token) {
+        const sso = token.split("sso=")[1].split(";")[0];
+
+        for (const model of Object.keys(this.modelConfig)) {
             if (!this.tokenModelMap[model]) {
                 this.tokenModelMap[model] = [];
+            }
+            if (!this.tokenStatusMap[sso]) {
+                this.tokenStatusMap[sso] = {};
             }
             const existingTokenEntry = this.tokenModelMap[model].find(entry => entry.token === token);
 
             if (!existingTokenEntry) {
-                this.tokenModelMap[model].push({
-                    token: token,
-                    RequestCount: 0,
-                    AddedTime: Date.now()
-                });
+                try {
+                    const remainingQueries = await this.fetchGrokStats(token, model);
+
+                    const modelRequestFrequency = this.modelConfig[model].RequestFrequency;
+                    const usedRequestCount = modelRequestFrequency - remainingQueries;
+
+                    if (usedRequestCount === modelRequestFrequency) {
+                        this.expiredTokens.add({
+                            token: token,
+                            model: model,
+                            expiredTime: Date.now()
+                        });
+
+                        if (!this.tokenStatusMap[sso][model]) {
+                            this.tokenStatusMap[sso][model] = {
+                                isValid: false,
+                                invalidatedTime: Date.now(),
+                                totalRequestCount: Math.max(0, usedRequestCount)
+                            };
+                        }
+
+                        if (!this.tokenResetSwitch) {
+                            this.startTokenResetProcess();
+                            this.tokenResetSwitch = true;
+                        }
+                    } else {
+                        this.tokenModelMap[model].push({
+                            token: token,
+                            RequestCount: Math.max(0, usedRequestCount),
+                            AddedTime: Date.now(),
+                            StartCallTime: null
+                        });
+
+                        if (!this.tokenStatusMap[sso][model]) {
+                            this.tokenStatusMap[sso][model] = {
+                                isValid: true,
+                                invalidatedTime: null,
+                                totalRequestCount: Math.max(0, usedRequestCount)
+                            };
+                        }
+                    }
+                } catch (error) {
+                    this.tokenModelMap[model].push({
+                        token: token,
+                        RequestCount: 0,
+                        AddedTime: Date.now(),
+                        StartCallTime: null
+                    });
+
+                    if (!this.tokenStatusMap[sso][model]) {
+                        this.tokenStatusMap[sso][model] = {
+                            isValid: true,
+                            invalidatedTime: null,
+                            totalRequestCount: 0
+                        };
+                    }
+
+                    Logger.error(`获取模型 ${model} 的统计信息失败: ${error}`, 'TokenManager');
+                }
+                await Utils.delay(200);
             }
-        });
+        }
     }
 
-    //直接设置token,仅适用于自己设置轮询而不是使用AuthTokenManager管理
     setToken(token) {
-        const models = ["grok-2", "grok-3", "grok-3-reasoning", "grok-3-deepsearch"];
-        
+        const models = Object.keys(this.modelConfig);
         this.tokenModelMap = models.reduce((map, model) => {
             map[model] = [{
                 token,
                 RequestCount: 0,
-                AddedTime: Date.now()
+                AddedTime: Date.now(),
+                StartCallTime: null
             }];
             return map;
         }, {});
+        const sso = token.split("sso=")[1].split(";")[0];
+        this.tokenStatusMap[sso] = models.reduce((statusMap, model) => {
+            statusMap[model] = {
+                isValid: true,
+                invalidatedTime: null,
+                totalRequestCount: 0
+            };
+            return statusMap;
+        }, {});
     }
 
+    async deleteToken(token) {
+        try {
+            const sso = token.split("sso=")[1].split(";")[0];
+            await Promise.all([
+                new Promise((resolve) => {
+                    this.tokenModelMap = Object.fromEntries(
+                        Object.entries(this.tokenModelMap).map(([model, entries]) => [
+                            model,
+                            entries.filter(entry => entry.token !== token)
+                        ])
+                    );
+                    resolve();
+                }),
+
+                new Promise((resolve) => {
+                    delete this.tokenStatusMap[sso];
+                    resolve();
+                }),
+            ]);
+            Logger.info(`令牌已成功移除: ${token}`, 'TokenManager');
+            return true;
+        } catch (error) {
+            Logger.error('令牌删除失败：', error);
+            return false;
+        }
+    }
     getNextTokenForModel(modelId) {
         const normalizedModel = this.normalizeModelName(modelId);
 
@@ -178,13 +308,28 @@ class AuthTokenManager {
         const tokenEntry = this.tokenModelMap[normalizedModel][0];
 
         if (tokenEntry) {
+            if (tokenEntry.StartCallTime === null || tokenEntry.StartCallTime === undefined) {
+                tokenEntry.StartCallTime = Date.now();
+            }
+            if (!this.tokenResetSwitch) {
+                this.startTokenResetProcess();
+                this.tokenResetSwitch = true;
+            }
             tokenEntry.RequestCount++;
+
             if (tokenEntry.RequestCount > this.modelConfig[normalizedModel].RequestFrequency) {
                 this.removeTokenFromModel(normalizedModel, tokenEntry.token);
                 const nextTokenEntry = this.tokenModelMap[normalizedModel][0];
                 return nextTokenEntry ? nextTokenEntry.token : null;
             }
-
+            const sso = tokenEntry.token.split("sso=")[1].split(";")[0];
+            if (this.tokenStatusMap[sso] && this.tokenStatusMap[sso][normalizedModel]) {
+                if (tokenEntry.RequestCount === this.modelConfig[normalizedModel].RequestFrequency) {
+                    this.tokenStatusMap[sso][normalizedModel].isValid = false;
+                    this.tokenStatusMap[sso][normalizedModel].invalidatedTime = Date.now();
+                }
+                this.tokenStatusMap[sso][normalizedModel].totalRequestCount++;
+            }
             return tokenEntry.token;
         }
 
@@ -193,15 +338,15 @@ class AuthTokenManager {
 
     removeTokenFromModel(modelId, token) {
         const normalizedModel = this.normalizeModelName(modelId);
-        
+
         if (!this.tokenModelMap[normalizedModel]) {
             Logger.error(`模型 ${normalizedModel} 不存在`, 'TokenManager');
             return false;
         }
-  
+
         const modelTokens = this.tokenModelMap[normalizedModel];
         const tokenIndex = modelTokens.findIndex(entry => entry.token === token);
-  
+
         if (tokenIndex !== -1) {
             const removedTokenEntry = modelTokens.splice(tokenIndex, 1)[0];
             this.expiredTokens.add({
@@ -209,18 +354,19 @@ class AuthTokenManager {
                 model: normalizedModel,
                 expiredTime: Date.now()
             });
-            if(!this.tokenResetSwitch){
+
+            if (!this.tokenResetSwitch) {
                 this.startTokenResetProcess();
                 this.tokenResetSwitch = true;
             }
             Logger.info(`模型${modelId}的令牌已失效，已成功移除令牌: ${token}`, 'TokenManager');
             return true;
         }
-  
+
         Logger.error(`在模型 ${normalizedModel} 中未找到 token: ${token}`, 'TokenManager');
         return false;
     }
-  
+
     getExpiredTokens() {
         return Array.from(this.expiredTokens);
     }
@@ -236,23 +382,24 @@ class AuthTokenManager {
         const normalizedModel = this.normalizeModelName(modelId);
         return this.tokenModelMap[normalizedModel]?.length || 0;
     }
+
     getRemainingTokenRequestCapacity() {
         const remainingCapacityMap = {};
-  
+
         Object.keys(this.modelConfig).forEach(model => {
             const modelTokens = this.tokenModelMap[model] || [];
-            
+
             const modelRequestFrequency = this.modelConfig[model].RequestFrequency;
-  
+
             const totalUsedRequests = modelTokens.reduce((sum, tokenEntry) => {
                 return sum + (tokenEntry.RequestCount || 0);
             }, 0);
-  
+
             // 计算剩余可用请求数量
             const remainingCapacity = (modelTokens.length * modelRequestFrequency) - totalUsedRequests;
             remainingCapacityMap[model] = Math.max(0, remainingCapacity);
         });
-  
+
         return remainingCapacityMap;
     }
 
@@ -262,8 +409,13 @@ class AuthTokenManager {
     }
 
     startTokenResetProcess() {
-        setInterval(() => {
+        if (this.tokenResetTimer) {
+            clearInterval(this.tokenResetTimer);
+        }
+
+        this.tokenResetTimer = setInterval(() => {
             const now = Date.now();
+
             this.expiredTokens.forEach(expiredTokenInfo => {
                 const { token, model, expiredTime } = expiredTokenInfo;
                 const expirationTime = this.modelConfig[model].ExpirationTime;
@@ -272,13 +424,50 @@ class AuthTokenManager {
                         this.tokenModelMap[model].push({
                             token: token,
                             RequestCount: 0,
-                            AddedTime: now
+                            AddedTime: now,
+                            StartCallTime: null
                         });
                     }
+                    const sso = token.split("sso=")[1].split(";")[0];
+
+                    if (this.tokenStatusMap[sso] && this.tokenStatusMap[sso][model]) {
+                        this.tokenStatusMap[sso][model].isValid = true;
+                        this.tokenStatusMap[sso][model].invalidatedTime = null;
+                        this.tokenStatusMap[sso][model].totalRequestCount = 0;
+                    }
+
                     this.expiredTokens.delete(expiredTokenInfo);
                 }
             });
-        }, 2 * 60 * 60 * 1000); // 每两小时运行一次
+
+            Object.keys(this.modelConfig).forEach(model => {
+                if (!this.tokenModelMap[model]) return;
+    
+                const processedTokens = this.tokenModelMap[model].map(tokenEntry => {
+                    if (!tokenEntry.StartCallTime) return tokenEntry;
+    
+                    const expirationTime = this.modelConfig[model].ExpirationTime;
+                    if (now - tokenEntry.StartCallTime >= expirationTime) {
+                        const sso = tokenEntry.token.split("sso=")[1].split(";")[0];
+                        if (this.tokenStatusMap[sso] && this.tokenStatusMap[sso][model]) {
+                            this.tokenStatusMap[sso][model].isValid = true;
+                            this.tokenStatusMap[sso][model].invalidatedTime = null;
+                            this.tokenStatusMap[sso][model].totalRequestCount = 0;
+                        }
+                        
+                        return {
+                            ...tokenEntry,
+                            RequestCount: 0,
+                            StartCallTime: null
+                        };
+                    }
+                    
+                    return tokenEntry;
+                });
+    
+                this.tokenModelMap[model] = processedTokens;
+            });
+        }, 1 * 60 * 60 * 1000); 
     }
 
     getAllTokens() {
@@ -287,6 +476,10 @@ class AuthTokenManager {
             modelTokens.forEach(entry => allTokens.add(entry.token));
         });
         return Array.from(allTokens);
+    }
+
+    getTokenStatusMap() {
+        return this.tokenStatusMap;
     }
 }
 
@@ -370,7 +563,7 @@ class GrokTempCookieManager {
         }
     }
     async initializeTempCookies(count = 1) {
-        Logger.info(`初始化 ${count} 个认证信息`, 'Server');
+        Logger.info(`开始初始化 ${count} 个临时账号认证信息`, 'Server');
         const browserOptions = {
             headless: true,
             args: [
@@ -1017,10 +1210,53 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
+
+app.get('/get/tokens', (req, res) => {
+    const authToken = req.headers.authorization?.replace('Bearer ', '');
+    if (CONFIG.API.IS_CUSTOM_SSO) {
+        return res.status(403).json({ error: '自定义的SSO令牌模式无法获取轮询sso令牌状态' });
+    } else if (authToken !== CONFIG.API.API_KEY) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    res.json(tokenManager.getTokenStatusMap());
+});
+app.post('/add/token', async (req, res) => {
+    const authToken = req.headers.authorization?.replace('Bearer ', '');
+    if (CONFIG.API.IS_CUSTOM_SSO) {
+        return res.status(403).json({ error: '自定义的SSO令牌模式无法添加sso令牌' });
+    } else if (authToken !== CONFIG.API.API_KEY) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    try {
+        const sso = req.body.sso;
+        await tokenManager.addToken(`sso-rw=${sso};sso=${sso}`);
+        res.status(200).json(tokenManager.getTokenStatusMap()[sso]);
+    } catch (error) {
+        Logger.error(error, 'Server');
+        res.status(500).json({ error: '添加sso令牌失败' });
+    }
+});
+app.post('/delete/token', async (req, res) => {
+    const authToken = req.headers.authorization?.replace('Bearer ', '');
+    if (CONFIG.API.IS_CUSTOM_SSO) {
+        return res.status(403).json({ error: '自定义的SSO令牌模式无法删除sso令牌' });
+    } else if (authToken !== CONFIG.API.API_KEY) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    try {
+        const sso = req.body.sso;
+        await tokenManager.deleteToken(`sso-rw=${sso};sso=${sso}`);
+        res.status(200).json({ message: '删除sso令牌成功' });
+    } catch (error) {
+        Logger.error(error, 'Server');
+        res.status(500).json({ error: '删除sso令牌失败' });
+    }
+});
+
 app.get('/v1/models', (req, res) => {
     res.json({
         object: "list",
-        data: Object.keys(CONFIG.MODELS).map((model, index) => ({
+        data: Object.keys(tokenManager.tokenModelMap).map((model, index) => ({
             id: model,
             object: "model",
             created: Math.floor(Date.now() / 1000),
@@ -1048,7 +1284,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         let retryCount = 0;
         const grokClient = new GrokApiClient(model);
         const requestPayload = await grokClient.prepareChatRequest(req.body);
-        Logger.info(`请求体: ${JSON.stringify(requestPayload, null, 2)}`, 'Server');
+        //Logger.info(`请求体: ${JSON.stringify(requestPayload, null, 2)}`, 'Server');
 
         while (retryCount < CONFIG.RETRY.MAX_ATTEMPTS) {
             retryCount++;
@@ -1085,7 +1321,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 } catch (error) {
                     Logger.error(error, 'Server');
                     if (isTempCookie) {
-                        // 移除当前失效的 cookie
                         tempCookieManager.cookies.splice(tempCookieManager.currentIndex, 1);
                         if (tempCookieManager.cookies.length != 0) {
                             tempCookieManager.currentIndex = tempCookieManager.currentIndex % tempCookieManager.cookies.length;
@@ -1101,9 +1336,9 @@ app.post('/v1/chat/completions', async (req, res) => {
                             }
                         }
                     } else {
-                        if(CONFIG.API.IS_CUSTOM_SSO) throw new Error(`自定义SSO令牌当前模型${model}的请求次数已失效`);
+                        if (CONFIG.API.IS_CUSTOM_SSO) throw new Error(`自定义SSO令牌当前模型${model}的请求次数已失效`);
                         tokenManager.removeTokenFromModel(model, CONFIG.API.SIGNATURE_COOKIE.cookie);
-                        if(tokenManager.getTokenCountForModel(model) === 0){
+                        if (tokenManager.getTokenCountForModel(model) === 0) {
                             throw new Error(`${model} 次数已达上限，请切换其他模型或者重新对话`);
                         }
                     }
@@ -1127,9 +1362,9 @@ app.post('/v1/chat/completions', async (req, res) => {
                             }
                         }
                     } else {
-                        if(CONFIG.API.IS_CUSTOM_SSO) throw new Error(`自定义SSO令牌当前模型${model}的请求次数已失效`);
+                        if (CONFIG.API.IS_CUSTOM_SSO) throw new Error(`自定义SSO令牌当前模型${model}的请求次数已失效`);
                         tokenManager.removeTokenFromModel(model, CONFIG.API.SIGNATURE_COOKIE.cookie);
-                        if(tokenManager.getTokenCountForModel(model) === 0){
+                        if (tokenManager.getTokenCountForModel(model) === 0) {
                             throw new Error(`${model} 次数已达上限，请切换其他模型或者重新对话`);
                         }
                     }
@@ -1152,7 +1387,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                             }
                         }
                     } else {
-                        if(CONFIG.API.IS_CUSTOM_SSO) throw new Error(`自定义SSO令牌当前模型${model}的请求次数已失效`);
+                        if (CONFIG.API.IS_CUSTOM_SSO) throw new Error(`自定义SSO令牌当前模型${model}的请求次数已失效`);
                         Logger.error(`令牌异常错误状态!status: ${response.status}`, 'Server');
                         tokenManager.removeTokenFromModel(model, CONFIG.API.SIGNATURE_COOKIE.cookie);
                         Logger.info(`当前${model}剩余可用令牌数: ${tokenManager.getTokenCountForModel(model)}`, 'Server');

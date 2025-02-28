@@ -95,6 +95,8 @@ docker run -it -d --name grok2api \
 
 ### 部署地址
 https://huggingface.co/spaces/yxmiler/GrokAPIService
+## Hugging Face说明
+ 因为抱脸的额外限制，部分代码参数可能和本仓库不一样，做了低效处理来保证镜像正常运行。
 
 ### 功能特点
 实现的功能：
@@ -108,6 +110,7 @@ https://huggingface.co/spaces/yxmiler/GrokAPIService
 8. grok2采用临时账号机制，理论无限调用，也可以使用自己账号的grok2。
 9. 可以选择是否移除思考模型的思考过程。
 10. 支持自行设置轮询和负载均衡，而不依靠项目代码
+11. 首次启动自动校对cookie的官网可用次数
 12. 已转换为openai格式。
 
 ### 可用模型列表
@@ -121,7 +124,7 @@ https://huggingface.co/spaces/yxmiler/GrokAPIService
 - `grok-3-reasoning`
 
 ### 模型可用次数参考
-- grok-2,grok-2-imageGen,grok-2-search 合计：20次  每2小时刷新
+- grok-2,grok-2-imageGen,grok-2-search 合计：30次  每1小时刷新
 - grok-3,grok-3-search,grok-3-imageGen 合计：20次  每2小时刷新
 - grok-3-deepsearch：10次 每24小时刷新
 - grok-3-reasoning：10次 每24小时刷新
