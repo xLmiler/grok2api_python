@@ -32,7 +32,7 @@ const CONFIG = {
         SIGNATURE_COOKIE: null,
         TEMP_COOKIE: null,
         PICGO_KEY: process.env.PICGO_KEY || null, //想要流式生图的话需要填入这个PICGO图床的key
-        TUMY_KEY: process.env.TUMY_KEY || null //想要流式生图的话需要填入这个TUMY图床的key 两个图床二选一，默认使用PICGO
+        TUMY_KEY: process.env.TUMY_KEY || null, //想要流式生图的话需要填入这个TUMY图床的key 两个图床二选一，默认使用PICGO
     },
     SERVER: {
         PORT: process.env.PORT || 3000,
@@ -47,7 +47,19 @@ const CONFIG = {
     IS_IMG_GEN2: false,
     TEMP_COOKIE_INDEX: 0,//临时cookie的下标
     ISSHOW_SEARCH_RESULTS: process.env.ISSHOW_SEARCH_RESULTS == undefined ? true : process.env.ISSHOW_SEARCH_RESULTS == 'true',//是否显示搜索结果
-    CHROME_PATH: process.env.CHROME_PATH || null
+    CHROME_PATH: process.env.CHROME_PATH || null,
+    ANTI_IDLE: {
+        ENABLED: true, // 是否启用anti-idle功能
+        INTERVAL: process.env.ANTI_IDLE_INTERVAL || 20000, // 发送保持活跃消息的间隔时间（毫秒），默认20秒
+        MESSAGE: "正在处理中，请稍候...", // 保持活跃的消息内容
+        THINKING_TAG: true // 是否使用<think></think>标签包裹思考过程
+    },
+    // 添加deepsearch相关配置
+    DEEPSEARCH: {
+        IS_THINKING_STARTED: false, // 是否已经开始思考过程
+        THINKING_CONTENT: "", // 思考过程的内容
+        FINAL_CONTENT: "" // 最终答案的内容
+    }
 };
 puppeteer.use(StealthPlugin())
 
@@ -688,8 +700,42 @@ async function processModelResponse(response, model) {
             result.token = response?.token;
             return result;
         case 'grok-3-deepsearch':
-            if (response?.messageTag === "final") {
-                result.token = response?.token;
+            // 对于deepsearch模型，处理思考过程和最终答案
+            if (response?.token) {
+                // 如果是最终消息
+                if (response?.messageTag === "final") {
+                    // 如果之前有思考过程且启用了思考标签
+                    if (CONFIG.DEEPSEARCH.IS_THINKING_STARTED && CONFIG.ANTI_IDLE.THINKING_TAG) {
+                        // 结束思考过程，返回思考内容和最终答案
+                        result.token = `</think>${response.token}`;
+                        CONFIG.DEEPSEARCH.IS_THINKING_STARTED = false;
+                        CONFIG.DEEPSEARCH.THINKING_CONTENT = "";
+                    } else {
+                        // 直接返回最终答案
+                        result.token = response.token;
+                    }
+                    CONFIG.DEEPSEARCH.FINAL_CONTENT = response.token;
+                } 
+                // 如果不是最终消息
+                else {
+                    // 如果启用了思考标签
+                    if (CONFIG.ANTI_IDLE.THINKING_TAG) {
+                        // 如果还没有开始思考过程
+                        if (!CONFIG.DEEPSEARCH.IS_THINKING_STARTED) {
+                            // 开始思考过程
+                            result.token = `<think>${response.token}`;
+                            CONFIG.DEEPSEARCH.IS_THINKING_STARTED = true;
+                        } else {
+                            // 继续思考过程
+                            result.token = response.token;
+                        }
+                        // 累积思考内容
+                        CONFIG.DEEPSEARCH.THINKING_CONTENT += response.token;
+                    } else {
+                        // 不使用思考标签，直接返回token
+                        result.token = response.token;
+                    }
+                }
             }
             return result;
         case 'grok-3-reasoning':
@@ -723,10 +769,49 @@ async function handleResponse(response, model, res, isStream) {
         CONFIG.IS_THINKING = false;
         CONFIG.IS_IMG_GEN = false;
         CONFIG.IS_IMG_GEN2 = false;
+        // 重置deepsearch相关状态
+        CONFIG.DEEPSEARCH.IS_THINKING_STARTED = false;
+        CONFIG.DEEPSEARCH.THINKING_CONTENT = "";
+        CONFIG.DEEPSEARCH.FINAL_CONTENT = "";
+        
         Logger.info("开始处理流式响应", 'Server');
+
+        // 添加anti-idle定时器
+        let antiIdleTimer = null;
+        let lastActivityTime = Date.now();
+        
+        if (isStream && CONFIG.ANTI_IDLE.ENABLED) {
+            // 创建anti-idle定时器，定期发送保持活跃的消息
+            antiIdleTimer = setInterval(() => {
+                // 如果超过指定时间没有活动，发送保持活跃的消息
+                const currentTime = Date.now();
+                if (currentTime - lastActivityTime >= CONFIG.ANTI_IDLE.INTERVAL) {
+                    // 发送一个保持活跃的消息
+                    if (model === 'grok-3-deepsearch' && CONFIG.ANTI_IDLE.THINKING_TAG) {
+                        // 如果是deepsearch模型且启用了思考标签
+                        if (!CONFIG.DEEPSEARCH.IS_THINKING_STARTED) {
+                            // 如果还没有开始思考过程，则开始思考过程
+                            res.write(`data: ${JSON.stringify(MessageProcessor.createChatResponse(`<think>${CONFIG.ANTI_IDLE.MESSAGE}`, model, true))}\n\n`);
+                            CONFIG.DEEPSEARCH.IS_THINKING_STARTED = true;
+                        } else {
+                            // 如果已经开始思考过程，则继续思考过程
+                            res.write(`data: ${JSON.stringify(MessageProcessor.createChatResponse(CONFIG.ANTI_IDLE.MESSAGE, model, true))}\n\n`);
+                        }
+                    } else {
+                        // 对于其他模型或未启用思考标签，发送注释消息
+                        res.write(`: ${CONFIG.ANTI_IDLE.MESSAGE}\n\n`);
+                    }
+                    Logger.info("发送anti-idle消息保持连接", 'Server');
+                    lastActivityTime = Date.now(); // 更新最后活动时间
+                }
+            }, CONFIG.ANTI_IDLE.INTERVAL);
+        }
 
         return new Promise((resolve, reject) => {
             stream.on('data', async (chunk) => {
+                // 更新最后活动时间
+                lastActivityTime = Date.now();
+                
                 buffer += chunk.toString();
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
@@ -755,6 +840,8 @@ async function handleResponse(response, model, res, isStream) {
                             if (result.token) {
                                 if (isStream) {
                                     res.write(`data: ${JSON.stringify(MessageProcessor.createChatResponse(result.token, model, true))}\n\n`);
+                                    // 更新最后活动时间
+                                    lastActivityTime = Date.now();
                                 } else {
                                     fullResponse += result.token;
                                 }
@@ -764,6 +851,8 @@ async function handleResponse(response, model, res, isStream) {
                                 const dataImage = await handleImageResponse(result.imageUrl);
                                 if (isStream) {
                                     res.write(`data: ${JSON.stringify(MessageProcessor.createChatResponse(dataImage, model, true))}\n\n`);
+                                    // 更新最后活动时间
+                                    lastActivityTime = Date.now();
                                 } else {
                                     res.json(MessageProcessor.createChatResponse(dataImage, model));
                                 }
@@ -779,6 +868,11 @@ async function handleResponse(response, model, res, isStream) {
 
             stream.on('end', async () => {
                 try {
+                    // 清除anti-idle定时器
+                    if (antiIdleTimer) {
+                        clearInterval(antiIdleTimer);
+                    }
+                    
                     await Promise.all(dataPromises);
                     if (isStream) {
                         res.write('data: [DONE]\n\n');
@@ -796,6 +890,11 @@ async function handleResponse(response, model, res, isStream) {
             });
 
             stream.on('error', (error) => {
+                // 清除anti-idle定时器
+                if (antiIdleTimer) {
+                    clearInterval(antiIdleTimer);
+                }
+                
                 Logger.error(error, 'Server');
                 reject(error);
             });
