@@ -37,7 +37,7 @@ jobs:
         platforms: linux/amd64,linux/arm64
         push: true
         tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/grok2api:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/grok2api:${{ github.sha }}
+          ${{ secrets.DOCKERHUB_USERNAME }}/grok2api_python:latest
+          ${{ secrets.DOCKERHUB_USERNAME }}/grok2api_python:${{ github.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max

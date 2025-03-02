@@ -1,0 +1,6 @@
+aiohttp==3.11.11
+cloudscraper==1.2.71
+loguru==0.7.3
+python-dotenv==1.0.1
+quart==0.20.0 
+quart-cors==0.8.0 

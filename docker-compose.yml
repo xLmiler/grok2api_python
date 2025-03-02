@@ -1,16 +1,15 @@
 version: '3.8'
 services:
-  grok2api:
-    image: yxmiler/grok2api:latest
-    container_name: grok2api
+  grok2api_python:
+    image: yxmiler/grok2api_python:latest
+    container_name: grok2api_python
     ports:
       - "3000:3000"
     environment:
-      - IS_TEMP_GROK2=true
-      - GROK2_CONCURRENCY_LEVEL=4
       - API_KEY=your_api_key
       - TUMY_KEY=你的图床key,和PICGO_KEY 二选一
       - PICGO_KEY=你的图床key,和TUMY_KEY二选一
+      - IS_TEMP_CONVERSATION=true
       - IS_CUSTOM_SSO=false
       - ISSHOW_SEARCH_RESULTS=false
       - PORT=3000

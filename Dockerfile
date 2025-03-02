@@ -1,22 +1,14 @@
-FROM node:18-alpine
-
-RUN apk add --no-cache \
-    chromium \
-    nss \
-    freetype \
-    harfbuzz \
-    ca-certificates
+FROM python:3.10-slim
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY requirements.txt .
 
-RUN npm install
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
 ENV PORT=3000
-
 EXPOSE 3000
 
-CMD ["npm", "start"]
+CMD ["python", "app.py"]
