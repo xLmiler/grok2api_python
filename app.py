@@ -526,7 +526,9 @@ class GrokApiClient:
         
         def remove_think_tags(text):
             import re
-            text = re.sub(r'<think>[\s\S]*?<\/think>', '', text).strip()
+            # 只有在不显示思考过程的情况下才移除思考标签
+            if not CONFIG["SHOW_THINKING"]:
+                text = re.sub(r'<think>[\s\S]*?<\/think>', '', text).strip()
             text = re.sub(r'!\[image\]\(data:.*?base64,.*?\)', '[图片]', text)
             return text
             
@@ -655,18 +657,15 @@ async def process_model_response(response, model):
             result["imageUrl"] = response["cachedImageGenerationResponse"]["imageUrl"]
         return result
     
-    if model == "grok-2":
-        result["token"] = response.get("token")
-    elif model in ["grok-2-search", "grok-3-search"]:
+    if model in ["grok-2-search", "grok-3-search"]:
         if response and response.get("webSearchResults") and CONFIG["ISSHOW_SEARCH_RESULTS"]:
             result["token"] = f"\r\n<think>{await Utils.organize_search_results(response['webSearchResults'])}</think>\r\n"
         else:
             result["token"] = response.get("token")
-    elif model == "grok-3":
-        result["token"] = response.get("token")
     elif model == "grok-3-deepsearch":
-        if response and response.get("messageTag") == "final":
-            result["token"] = response.get("token")        
+        # 对于流式处理，grok-3-deepsearch 已在 stream_response_generator 处理
+        # 这里只处理非流式情况
+        result["token"] = response.get("token")
     elif model == "grok-3-reasoning":
         if response and response.get("isThinking", False) and not CONFIG["SHOW_THINKING"]:
             return result
@@ -679,6 +678,11 @@ async def process_model_response(response, model):
             CONFIG["IS_THINKING"] = False
         else:
             result["token"] = response.get("token")
+    else:
+        result["token"] = response.get("token")
+        
+        if CONFIG["SHOW_THINKING"] and response and response.get("thinking"):
+            result["token"] = f"<think>{response.get('thinking')}</think>\n{result['token']}"
             
     return result
 
@@ -687,6 +691,7 @@ async def stream_response_generator(response, model):
         CONFIG["IS_THINKING"] = False
         CONFIG["IS_IMG_GEN"] = False
         CONFIG["IS_IMG_GEN2"] = False
+        thinking_buffer = ""  # 用于累积思考内容
         logger.info("开始处理流式响应", "Server")
         
         async def iter_lines():
@@ -730,10 +735,96 @@ async def stream_response_generator(response, model):
                 response_data = line_json.get("result", {}).get("response")
                 if not response_data:
                     continue
+                
+                # 添加调试日志，帮助了解 grok-3-deepsearch 模型的响应结构
+                if model == "grok-3-deepsearch":
+                    # 记录响应数据的所有键，帮助识别可能包含思考过程的字段
+                    logger.info(f"grok-3-deepsearch 响应字段: {list(response_data.keys())}", "Server")
                     
+                    # 如果有中间步骤，记录它们的内容
+                    if response_data.get("intermediateSteps"):
+                        logger.info(f"中间步骤: {response_data['intermediateSteps'][:200]}...", "Server")
+                    
+                    # 记录消息标签
+                    if response_data.get("messageTag"):
+                        logger.info(f"消息标签: {response_data['messageTag']}", "Server")
+                
+                # 特殊处理 grok-3-deepsearch 模型
+                if model == "grok-3-deepsearch" and CONFIG["SHOW_THINKING"]:
+                    # 如果是包含思考内容的消息，并且不是最终响应
+                    if not response_data.get("messageTag") == "final":
+                        logger.info(f"处理 grok-3-deepsearch 非最终响应，状态: {CONFIG['IS_THINKING']}", "DeepSearch")
+                        # 收集思考内容
+                        if response_data.get("token"):
+                            # 如果我们还没有开始思考模式，则开始
+                            if not CONFIG["IS_THINKING"]:
+                                logger.info(f"开始思考模式，准备输出 <think> 标签", "DeepSearch")
+                                yield f"data: {json.dumps(MessageProcessor.create_chat_response('<think>', model, True))}\n\n"
+                                CONFIG["IS_THINKING"] = True
+                            
+                            # 处理token内容，如果是JSON字符串，进行特殊处理
+                            token_content = response_data.get("token")
+                            try:
+                                # 尝试解析JSON
+                                if token_content.strip().startswith('{'):
+                                    json_obj = json.loads(token_content)
+                                    token_content = json.dumps(json_obj, ensure_ascii=False)
+                            except:
+                                pass  # 如果不是有效的JSON，保持原样
+                            
+                            # 发送思考内容
+                            logger.info(f"发送思考内容: {token_content[:50]}...", "DeepSearch")
+                            yield f"data: {json.dumps(MessageProcessor.create_chat_response(token_content, model, True))}\n\n"
+                        
+                        # 如果有搜索结果，添加到思考内容
+                        if response_data.get("webSearchResults"):
+                            search_results = await Utils.organize_search_results(response_data['webSearchResults'])
+                            if search_results:
+                                logger.info(f"处理搜索结果，思考状态: {CONFIG['IS_THINKING']}", "DeepSearch")
+                                if not CONFIG["IS_THINKING"]:
+                                    logger.info(f"开始思考模式(搜索结果)，准备输出 <think> 标签", "DeepSearch")
+                                    yield f"data: {json.dumps(MessageProcessor.create_chat_response('<think>', model, True))}\n\n"
+                                    CONFIG["IS_THINKING"] = True
+                                
+                                logger.info(f"发送搜索结果思考内容", "DeepSearch")
+                                yield "data: " + json.dumps(MessageProcessor.create_chat_response('搜索结果:\n' + search_results, model, True)) + "\n\n"
+                        
+                        # 继续收集下一个消息
+                        continue
+                    
+                    # 如果是最终响应
+                    elif response_data.get("messageTag") == "final":
+                        logger.info(f"处理 grok-3-deepsearch 最终响应，思考状态: {CONFIG['IS_THINKING']}", "DeepSearch")
+                        # 如果我们处于思考模式，结束思考模式
+                        if CONFIG["IS_THINKING"]:
+                            logger.info(f"结束思考模式，输出 </think> 标签", "DeepSearch")
+                            yield f"data: {json.dumps(MessageProcessor.create_chat_response('</think>', model, True))}\n\n"
+                            CONFIG["IS_THINKING"] = False
+                        
+                        # 发送最终响应
+                        if response_data.get("token"):
+                            logger.info(f"发送最终响应: {response_data.get('token')[:50]}...", "DeepSearch")
+                            yield f"data: {json.dumps(MessageProcessor.create_chat_response(response_data.get('token'), model, True))}\n\n"
+                        else:
+                            logger.warning(f"最终响应中没有 token 字段", "DeepSearch")
+                        
+                        # 继续处理下一个消息
+                        continue
+                
+                # 对于其他模型，使用通用处理逻辑
+                if CONFIG["SHOW_THINKING"] and response_data.get("thinking"):
+                    thinking = response_data.get("thinking")
+                    if thinking:
+                        if not CONFIG["IS_THINKING"]:
+                            yield f"data: {json.dumps(MessageProcessor.create_chat_response('<think>', model, True))}\n\n"
+                            CONFIG["IS_THINKING"] = True
+                        yield f"data: {json.dumps(MessageProcessor.create_chat_response(thinking, model, True))}\n\n"
+                        yield f"data: {json.dumps(MessageProcessor.create_chat_response('</think>', model, True))}\n\n"
+                        CONFIG["IS_THINKING"] = False
+                
                 if response_data.get("doImgGen") or response_data.get("imageAttachmentInfo"):
                     CONFIG["IS_IMG_GEN"] = True
-                    
+                
                 result = await process_model_response(response_data, model)
                 
                 if result["token"]:
@@ -762,6 +853,8 @@ async def handle_normal_response(response, model):
         CONFIG["IS_IMG_GEN2"] = False
         logger.info("开始处理非流式响应", "Server")
         image_url = None
+        thinking_content = None
+        final_response = None
         
         async def iter_lines():
             line_iter = response.iter_lines()
@@ -804,10 +897,64 @@ async def handle_normal_response(response, model):
                 response_data = line_json.get("result", {}).get("response")
                 if not response_data:
                     continue
+                
+                # 添加调试日志，帮助了解 grok-3-deepsearch 模型的响应结构
+                if model == "grok-3-deepsearch":
+                    # 记录响应数据的所有键，帮助识别可能包含思考过程的字段
+                    logger.info(f"grok-3-deepsearch 响应字段: {list(response_data.keys())}", "Server")
                     
+                    # 如果有中间步骤，记录它们的内容
+                    if response_data.get("intermediateSteps"):
+                        logger.info(f"中间步骤: {response_data['intermediateSteps'][:200]}...", "Server")
+                    
+                    # 记录消息标签
+                    if response_data.get("messageTag"):
+                        logger.info(f"消息标签: {response_data['messageTag']}", "Server")
+                
+                # 特殊处理 grok-3-deepsearch 模型
+                if model == "grok-3-deepsearch" and CONFIG["SHOW_THINKING"]:
+                    # 如果是包含思考内容的消息，并且不是最终响应
+                    if not response_data.get("messageTag") == "final":
+                        # 收集思考内容
+                        if response_data.get("token"):
+                            if thinking_content:
+                                thinking_content += response_data.get("token")
+                            else:
+                                thinking_content = response_data.get("token")
+                        
+                        # 如果有搜索结果，添加到思考内容
+                        if response_data.get("webSearchResults"):
+                            search_results = await Utils.organize_search_results(response_data['webSearchResults'])
+                            if search_results:
+                                if thinking_content:
+                                    thinking_content += f"\n\n搜索结果:\n{search_results}"
+                                else:
+                                    thinking_content = f"搜索结果:\n{search_results}"
+                        
+                        # 继续收集下一个消息
+                        continue
+                    
+                    # 如果是最终响应
+                    elif response_data.get("messageTag") == "final":
+                        # 保存最终响应
+                        final_response = response_data.get("token")
+                        # 继续处理下一个消息
+                        continue
+                
+                # 对于其他模型，使用通用处理逻辑
+                if CONFIG["SHOW_THINKING"]:
+                    # 检查普通的thinking字段
+                    if response_data.get("thinking"):
+                        thinking = response_data.get("thinking")
+                        if thinking:
+                            if thinking_content:
+                                thinking_content += thinking
+                            else:
+                                thinking_content = thinking
+                
                 if response_data.get("doImgGen") or response_data.get("imageAttachmentInfo"):
                     CONFIG["IS_IMG_GEN"] = True
-                    
+                
                 result = await process_model_response(response_data, model)
                 
                 if result["token"]:
@@ -820,6 +967,21 @@ async def handle_normal_response(response, model):
             except Exception as error:
                 logger.error(f"处理行数据错误: {str(error)}", "Server")
                 continue
+        
+        # 构建最终响应
+        if model == "grok-3-deepsearch" and CONFIG["SHOW_THINKING"]:
+            # 如果我们收集了思考内容并且有最终响应
+            if thinking_content and final_response:
+                full_response = f"<think>{thinking_content}</think>\n{final_response}"
+            # 如果只有思考内容
+            elif thinking_content:
+                full_response = f"<think>{thinking_content}</think>"
+            # 如果只有最终响应
+            elif final_response:
+                full_response = final_response
+        # 对于其他模型，添加思考过程到最终响应
+        elif thinking_content and CONFIG["SHOW_THINKING"]:
+            full_response = f"<think>{thinking_content}</think>\n{full_response}"
                 
         if CONFIG["IS_IMG_GEN2"] and image_url:
             data_image = await handle_image_response(image_url, model)
@@ -1095,6 +1257,28 @@ async def chat_completions():
 async def index():
     return "api运行正常"
 
+@app.route('/help', methods=['GET'])
+async def help():
+    return jsonify({
+        "status": "运行正常",
+        "config": {
+            "SHOW_THINKING": CONFIG["SHOW_THINKING"],
+            "usage": "设置环境变量 SHOW_THINKING=true 来启用思考过程输出功能"
+        },
+        "models": list(CONFIG["MODELS"].keys()),
+        "features": {
+            "thinking_tags": "启用 SHOW_THINKING 后，响应中将包含 <think> 标签，包含模型的思考过程",
+            "search_results": "对于搜索相关模型，搜索结果将在 <think> 标签内显示"
+        }
+    })
+
 if __name__ == "__main__":
     asyncio.run(initialize_tokens())
+    
+    # 添加启动提示，指导如何启用思考过程功能
+    if CONFIG["SHOW_THINKING"]:
+        logger.info("思考过程输出功能已启用，响应中将包含 <think> 标签", "Server")
+    else:
+        logger.info("思考过程输出功能未启用，设置环境变量 SHOW_THINKING=true 可启用此功能", "Server")
+    
     app.run(host="0.0.0.0", port=CONFIG["SERVER"]["PORT"])
