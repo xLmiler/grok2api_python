@@ -439,12 +439,17 @@ class Utils:
         results = search_results['results']
         formatted_results = []
 
-        for index, result in enumerate(results):
-            title = result.get('title', '未知标题')
-            url = result.get('url', '#')
-            preview = result.get('preview', '无预览内容')
+        formatted_results.append(f"Searched {len(results)} web pages:")
 
-            formatted_result = f"\r\n<details><summary>资料[{index}]: {title}</summary>\r\n{preview}\r\n\n[Link]({url})\r\n</details>"
+        for index, result in enumerate(results):
+            title = result.get('title', 'Unknown Title')
+            url = result.get('url', '#')
+            preview = result.get('preview', 'Unknown Preview')
+
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc
+
+            formatted_result = f"{index + 1}. [{title} *from {domain}*]({url})\n    - {preview}\n"
             formatted_results.append(formatted_result)
 
         return '\n\n'.join(formatted_results)
