@@ -130,21 +130,23 @@ CONFIG = {
 
 
 DEFAULT_HEADERS = {
-    'Accept': '*/*',
-    'Accept-Language': 'zh-CN,zh;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br, zstd',
-    'Content-Type': 'text/plain;charset=UTF-8',
-    'Connection': 'keep-alive',
-    'Origin': 'https://grok.com',
-    'Priority': 'u=1, i',
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-    'Sec-Ch-Ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"macOS"',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
+
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Content-Type': 'application/json',
+            'Connection': 'keep-alive',
+            'Origin': 'https://grok.com',
+            'Referer': 'https://grok.com/',
+            'Priority': 'u=1, i',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+            'Sec-Ch-Ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
 }
 
 class AuthTokenManager:
@@ -566,50 +568,75 @@ class GrokApiClient:
             logger.error(str(error), "Server")
             raise Exception(f"上传文件失败,状态码:{response.status_code}")
     def upload_base64_image(self, base64_data, url):
-        try:
-            if 'data:image' in base64_data:
-                image_buffer = base64_data.split(',')[1]
-            else:
-                image_buffer = base64_data
+    try:
+        if 'data:image' in base64_data:
+            image_buffer = base64_data.split(',')[1]
+        else:
+            image_buffer = base64_data
 
-            image_info = self.get_image_type(base64_data)
-            mime_type = image_info["mimeType"]
-            file_name = image_info["fileName"]
+        image_info = self.get_image_type(base64_data)
+        mime_type = image_info["mimeType"]
+        file_name = image_info["fileName"]
 
-            upload_data = {
-                "rpc": "uploadFile",
-                "req": {
-                    "fileName": file_name,
-                    "fileMimeType": mime_type,
-                    "content": image_buffer
-                }
-            }
+        # 为每次上传创建唯一请求ID
+        request_id = str(uuid.uuid4())
+        trace_id = str(uuid.uuid4())
 
-            logger.info("发送图片请求", "Server")
+        upload_data = {
+            "fileName": file_name,
+            "fileMimeType": mime_type,
+            "content": image_buffer
+        }
 
-            proxy_options = Utils.get_proxy_options()
-            response = curl_requests.post(
-                url,
-                headers={
-                    **DEFAULT_HEADERS,
-                    "Cookie":CONFIG["SERVER"]['COOKIE']
-                },
-                json=upload_data,
-                impersonate="chrome133a",
-                **proxy_options
-            )
+        logger.info("发送图片请求", "Server")
 
-            if response.status_code != 200:
-                logger.error(f"上传图片失败,状态码:{response.status_code}", "Server")
-                return ''
+        # 设置更接近Chrome浏览器格式的请求头
+        upload_headers = {
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Content-Type': 'application/json',
+            'Connection': 'keep-alive',
+            'Origin': 'https://grok.com',
+            'Referer': 'https://grok.com/',
+            'Priority': 'u=1, i',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+            'Sec-Ch-Ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c',
+            'Cookie': CONFIG["SERVER"]['COOKIE']
+        }
 
-            result = response.json()
-            logger.info(f"上传图片成功: {result}", "Server")
-            return result.get("fileMetadataId", "")
+        proxy_options = Utils.get_proxy_options()
+        
+        # 直接使用上传端点URL
+        upload_url = "https://grok.com/rest/app-chat/upload-file"
+        
+        response = curl_requests.post(
+            upload_url,
+            headers=upload_headers,
+            json=upload_data,
+            impersonate="chrome133a",
+            **proxy_options
+        )
 
-        except Exception as error:
-            logger.error(str(error), "Server")
+        logger.info(f"上传响应状态: {response.status_code}", "Server")
+        
+        if response.status_code != 200:
+            logger.error(f"上传图片失败,状态码:{response.status_code}, 响应: {response.text}", "Server")
             return ''
+
+        result = response.json()
+        logger.info(f"上传图片成功: {result}", "Server")
+        return result.get("fileMetadataId", "")
+
+    except Exception as error:
+        logger.error(f"上传图片异常: {str(error)}", "Server")
+        return ''
     # def convert_system_messages(self, messages):
     #     try:
     #         system_prompt = []
