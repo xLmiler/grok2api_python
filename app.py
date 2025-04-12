@@ -689,14 +689,14 @@ class GrokApiClient:
                         if item["type"] == 'image_url':
                             processed_image = self.upload_base64_image(
                                 item["image_url"]["url"],
-                                f"{CONFIG['API']['BASE_URL']}/api/rpc"
+                                f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file"
                             )
                             if processed_image:
                                 file_attachments.append(processed_image)
                 elif isinstance(current["content"], dict) and current["content"].get("type") == 'image_url':
                     processed_image = self.upload_base64_image(
                         current["content"]["image_url"]["url"],
-                        f"{CONFIG['API']['BASE_URL']}/api/rpc"
+                        f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file"
                     )
                     if processed_image:
                         file_attachments.append(processed_image)
