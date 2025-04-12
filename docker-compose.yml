@@ -1,18 +1,22 @@
-version: '3.8'
+version: '3'
+
 services:
-  grok2api_python:
-    image: yxmiler/grok2api_python:latest
-    container_name: grok2api_python
+  app:
+    image: python:3.10-slim
+    working_dir: /app
+    volumes:
+      - .:/app
+      - ./data:/data
     ports:
-      - "3000:3000"
+      - "30005:3000"
     environment:
+      - PORT=3000
       - API_KEY=your_api_key
-      - TUMY_KEY=你的图床key,和PICGO_KEY 二选一
+      - TUMY_KEY=你的图床key,和PICGO_KEY二选一
       - PICGO_KEY=你的图床key,和TUMY_KEY二选一
       - IS_TEMP_CONVERSATION=true
       - IS_CUSTOM_SSO=false
       - ISSHOW_SEARCH_RESULTS=false
-      - PORT=3000
       - SHOW_THINKING=true
       - SSO=your_sso
-    restart: unless-stopped
+    command: bash -c "pip install --no-cache-dir flask requests curl_cffi werkzeug loguru && python app.py"
