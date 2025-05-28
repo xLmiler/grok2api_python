@@ -147,7 +147,7 @@ DEFAULT_HEADERS = {
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
             'x-statsig-id' : 'u3HZWfr6XPNMwCckGEtjV6U21Hl0EqcRfopZCIJQ2ZqmM1wY0AYTcJeaeV3W/JG3l/ezXLhZRNJlokK4yj6cw8SblCH3uA',
-            'x-xai-request-id' : '668de0cb-838a-45ca-bb6c-29ffc32822b7'
+            'x-xai-request-id' : '668de0cb-838a-45ca-bb6c-29ffc32822b7',
             'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
 }
 
