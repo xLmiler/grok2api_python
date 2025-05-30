@@ -144,8 +144,35 @@ DEFAULT_HEADERS = {
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
-    'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
+    'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c',
+    'x-statsig-id': 'PLACEHOLDER_STATSIG_ID',
+    'x-xai-request-id': str(uuid.uuid4())
 }
+
+
+def refresh_statsig_headers():
+    """Fetch dynamic statsig data and update headers."""
+    try:
+        proxy_options = Utils.get_proxy_options()
+        resp = curl_requests.get(
+            "https://rui.soundai.ee/x.php",
+            impersonate="chrome133a",
+            timeout=8,
+            **proxy_options,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            DEFAULT_HEADERS["x-statsig-id"] = data.get(
+                "x_statsig_id", DEFAULT_HEADERS["x-statsig-id"]
+            )
+            logger.info("成功获取 x-statsig-id", "Server")
+        else:
+            logger.warning(
+                f"获取 x-statsig-id 失败: {resp.status_code}", "Server"
+            )
+    except Exception as exc:
+        logger.error(f"获取 x-statsig-id 异常: {exc}", "Server")
+    DEFAULT_HEADERS["x-xai-request-id"] = str(uuid.uuid4())
 
 class AuthTokenManager:
     def __init__(self):
@@ -1033,6 +1060,8 @@ def initialization():
 
     if CONFIG["API"]["PROXY"]:
         logger.info(f"代理已设置: {CONFIG['API']['PROXY']}", "Server")
+
+    refresh_statsig_headers()
 
 logger.info("初始化完成", "Server")
 
