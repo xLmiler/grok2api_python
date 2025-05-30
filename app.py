@@ -144,7 +144,9 @@ DEFAULT_HEADERS = {
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
-    'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
+    'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c',
+    'x-statsig-id': 'PLACEHOLDER_STATSIG_ID',
+    'x-xai-request-id': str(uuid.uuid4())
 }
 
 class AuthTokenManager:
