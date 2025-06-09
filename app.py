@@ -14,6 +14,27 @@ from flask import Flask, request, Response, jsonify, stream_with_context, render
 from curl_cffi import requests as curl_requests
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+class StatsigIDCache:
+    def __init__(self):
+        self.cached_id = None
+        self.last_fetch_time = 0
+        self.expiry_seconds = 16 * 60 * 60  # 1天
+
+    def get_id(self):
+        now = time.time()
+        if self.cached_id and (now - self.last_fetch_time < self.expiry_seconds):
+            return self.cached_id
+        try:
+            resp = requests.get('https://grok-statsig.vercel.app/get_grok_statsig', timeout=5)
+            self.cached_id = resp.json().get('id', '')
+            self.last_fetch_time = now
+        except Exception:
+            # 请求失败时返回缓存（如果有）
+            pass
+        return self.cached_id or ''
+
+# 实例化
+statsig_id_cache = StatsigIDCache()
 class Logger:
     def __init__(self, level="INFO", colorize=True, format=None):
         logger.remove()
@@ -130,21 +151,25 @@ CONFIG = {
 
 
 DEFAULT_HEADERS = {
-    'Accept': '*/*',
-    'Accept-Language': 'zh-CN,zh;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br, zstd',
-    'Content-Type': 'text/plain;charset=UTF-8',
-    'Connection': 'keep-alive',
-    'Origin': 'https://grok.com',
-    'Priority': 'u=1, i',
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-    'Sec-Ch-Ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"macOS"',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
+
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Content-Type': 'application/json',
+            'Connection': 'keep-alive',
+            'Origin': 'https://grok.com',
+            'Referer': 'https://grok.com/',
+            'Priority': 'u=1, i',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+            'Sec-Ch-Ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'x-statsig-id' : statsig_id_cache.get_id(),
+            'x-xai-request-id' : '668de0cb-838a-45ca-bb6c-29ffc32822b7',
+            'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
 }
 
 class AuthTokenManager:
@@ -517,7 +542,7 @@ class GrokApiClient:
         return None
 
     def get_image_type(self, base64_string):
-        mime_type = 'image/jpeg'
+        mime_type = 'image/png'
         if 'data:image' in base64_string:
             import re
             matches = re.search(r'data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+);base64,', base64_string)
@@ -576,31 +601,69 @@ class GrokApiClient:
             mime_type = image_info["mimeType"]
             file_name = image_info["fileName"]
 
+            # 为每次上传创建唯一请求ID
+            request_id = str(uuid.uuid4())
+            trace_id = str(uuid.uuid4())
+
             upload_data = {
-                "rpc": "uploadFile",
-                "req": {
-                    "fileName": file_name,
-                    "fileMimeType": mime_type,
-                    "content": image_buffer
-                }
+                "fileName": file_name,
+                "fileMimeType": mime_type,
+                "content": image_buffer
             }
 
             logger.info("发送图片请求", "Server")
 
+            # 确保我们有有效的认证Cookie
+            if not CONFIG["API"]["SIGNATURE_COOKIE"]:
+                CONFIG["API"]["SIGNATURE_COOKIE"] = Utils.create_auth_headers(self.model_id, True)
+                
+            # 确保正确格式化Cookie
+            if CONFIG['SERVER']['CF_CLEARANCE']:
+                cookie_str = f"{CONFIG['API']['SIGNATURE_COOKIE']};cf_clearance={CONFIG['SERVER']['CF_CLEARANCE']}"
+            else:
+                cookie_str = CONFIG['API']['SIGNATURE_COOKIE']
+                
+            logger.info(f"使用Cookie: {cookie_str}", "Server")
+
+            # 设置更接近Chrome浏览器格式的请求头
+            upload_headers = {
+                'Accept': '*/*',
+                'Accept-Language': 'zh-CN,zh;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Content-Type': 'application/json',
+                'Connection': 'keep-alive',
+                'Origin': 'https://grok.com',
+                'Referer': 'https://grok.com/',
+                'Priority': 'u=1, i',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+                'Sec-Ch-Ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+                'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c',
+                'Cookie': cookie_str
+            }
+
             proxy_options = Utils.get_proxy_options()
+            
+            # 直接使用上传端点URL
+            upload_url = "https://grok.com/rest/app-chat/upload-file"
+            
+            logger.info("发送图片上传请求", "Server")
             response = curl_requests.post(
-                url,
-                headers={
-                    **DEFAULT_HEADERS,
-                    "Cookie":CONFIG["SERVER"]['COOKIE']
-                },
+                upload_url,
+                headers=upload_headers,
                 json=upload_data,
                 impersonate="chrome133a",
                 **proxy_options
             )
 
+            logger.info(f"上传响应状态: {response.status_code}", "Server")
+            
             if response.status_code != 200:
-                logger.error(f"上传图片失败,状态码:{response.status_code}", "Server")
+                logger.error(f"上传图片失败,状态码:{response.status_code}, 响应: {response.text}", "Server")
                 return ''
 
             result = response.json()
@@ -608,7 +671,7 @@ class GrokApiClient:
             return result.get("fileMetadataId", "")
 
         except Exception as error:
-            logger.error(str(error), "Server")
+            logger.error(f"上传图片异常: {str(error)}", "Server")
             return ''
     # def convert_system_messages(self, messages):
     #     try:
@@ -689,14 +752,14 @@ class GrokApiClient:
                         if item["type"] == 'image_url':
                             processed_image = self.upload_base64_image(
                                 item["image_url"]["url"],
-                                f"{CONFIG['API']['BASE_URL']}/api/rpc"
+                                f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file"
                             )
                             if processed_image:
                                 file_attachments.append(processed_image)
                 elif isinstance(current["content"], dict) and current["content"].get("type") == 'image_url':
                     processed_image = self.upload_base64_image(
                         current["content"]["image_url"]["url"],
-                        f"{CONFIG['API']['BASE_URL']}/api/rpc"
+                        f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file"
                     )
                     if processed_image:
                         file_attachments.append(processed_image)
@@ -717,7 +780,7 @@ class GrokApiClient:
             message_length += len(messages)
             if message_length >= 40000:
                 convert_to_file = True
-               
+                
         if convert_to_file:
             file_id = self.upload_base64_file(messages, request["model"])
             if file_id:
