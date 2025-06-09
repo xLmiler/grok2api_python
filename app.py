@@ -14,6 +14,27 @@ from flask import Flask, request, Response, jsonify, stream_with_context, render
 from curl_cffi import requests as curl_requests
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+class StatsigIDCache:
+    def __init__(self):
+        self.cached_id = None
+        self.last_fetch_time = 0
+        self.expiry_seconds = 16 * 60 * 60  # 1天
+
+    def get_id(self):
+        now = time.time()
+        if self.cached_id and (now - self.last_fetch_time < self.expiry_seconds):
+            return self.cached_id
+        try:
+            resp = requests.get('https://grok-statsig.vercel.app/get_grok_statsig', timeout=5)
+            self.cached_id = resp.json().get('id', '')
+            self.last_fetch_time = now
+        except Exception:
+            # 请求失败时返回缓存（如果有）
+            pass
+        return self.cached_id or ''
+
+# 实例化
+statsig_id_cache = StatsigIDCache()
 class Logger:
     def __init__(self, level="INFO", colorize=True, format=None):
         logger.remove()
@@ -146,7 +167,7 @@ DEFAULT_HEADERS = {
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
-            'x-statsig-id' : requests.get('https://grok-statsig.vercel.app/get_grok_statsig').json().get('id', ''),
+            'x-statsig-id' : statsig_id_cache.get_id(),
             'x-xai-request-id' : '668de0cb-838a-45ca-bb6c-29ffc32822b7',
             'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
 }
