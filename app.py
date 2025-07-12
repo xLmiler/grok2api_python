@@ -198,7 +198,6 @@ class AuthTokenManager:
         self.model_config = self.model_normal_config
         self.token_reset_switch = False
         self.token_reset_timer = None
-        self.load_token_status() # 加载令牌状态
     def save_token_status(self):
         try:        
             with open(CONFIG["TOKEN_STATUS_FILE"], 'w', encoding='utf-8') as f:
@@ -335,10 +334,15 @@ class AuthTokenManager:
             return None
 
         token_entry = self.token_model_map[normalized_model][0]
+        logger.info(f"token_entry: {token_entry}", "TokenManager")
         if is_return:
             return token_entry["token"]
 
         if token_entry:
+            if token_entry["type"] == "super":
+                self.model_config = self.model_super_config
+            else:
+                self.model_config = self.model_normal_config
             if token_entry["StartCallTime"] is None:
                 token_entry["StartCallTime"] = int(time.time() * 1000)
 
@@ -354,11 +358,14 @@ class AuthTokenManager:
                 return next_token_entry["token"] if next_token_entry else None
 
             sso = token_entry["token"].split("sso=")[1].split(";")[0]
+
             if sso in self.token_status_map and normalized_model in self.token_status_map[sso]:
                 if token_entry["RequestCount"] == self.model_config[normalized_model]["RequestFrequency"]:
                     self.token_status_map[sso][normalized_model]["isValid"] = False
                     self.token_status_map[sso][normalized_model]["invalidatedTime"] = int(time.time() * 1000)
                 self.token_status_map[sso][normalized_model]["totalRequestCount"] += 1
+
+                
 
                 self.save_token_status()
 
@@ -1115,9 +1122,9 @@ def initialization():
 
     logger.info("开始加载令牌", "Server")
     token_manager.load_token_status()
-    for sso in combined_dict:
-        if sso:
-            token_manager.add_token(sso,True)
+    for tokens in combined_dict:
+        if tokens:
+            token_manager.add_token(tokens,True)
     token_manager.save_token_status()
 
     logger.info(f"成功加载令牌: {json.dumps(token_manager.get_all_tokens(), indent=2)}", "Server")
@@ -1127,7 +1134,7 @@ def initialization():
     if CONFIG["API"]["PROXY"]:
         logger.info(f"代理已设置: {CONFIG['API']['PROXY']}", "Server")
 
-logger.info("初始化完成", "Server")
+    logger.info("初始化完成", "Server")
 
 
 app = Flask(__name__)
@@ -1171,7 +1178,7 @@ def add_manager_token():
         sso = request.json.get('sso')
         if not sso:
             return jsonify({"error": "SSO token is required"}), 400
-        token_manager.add_token(f"sso-rw={sso};sso={sso}")
+        token_manager.add_token({"token":f"sso-rw={sso};sso={sso}","type":"normal"})
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1222,7 +1229,7 @@ def add_token():
 
     try:
         sso = request.json.get('sso')
-        token_manager.add_token({"token":f"sso-rw={sso.token};sso={sso.token}","type":sso.type})
+        token_manager.add_token({"token":f"sso-rw={sso};sso={sso}","type":"normal"})
         return jsonify(token_manager.get_token_status_map().get(sso, {})), 200
     except Exception as error:
         logger.error(str(error), "Server")
@@ -1294,8 +1301,7 @@ def chat_completions():
         retry_count = 0
         grok_client = GrokApiClient(model)
         request_payload = grok_client.prepare_chat_request(data)
-        logger.info(
-            f"当前令牌: {json.dumps(CONFIG['API']['SIGNATURE_COOKIE'], indent=2)}","Server")
+
         logger.info(json.dumps(request_payload,indent=2))
 
         while retry_count < CONFIG["RETRY"]["MAX_ATTEMPTS"]:
