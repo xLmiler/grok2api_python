@@ -340,12 +340,12 @@
     <div class="notification" id="notification"></div>
 
     <script>
-        const modelConfig = {
-            "grok-2": { RequestFrequency: 30, ExpirationTime: 3600000 },
+        var modelConfig = {
             "grok-3": { RequestFrequency: 20, ExpirationTime: 7200000 },
             "grok-3-deepsearch": { RequestFrequency: 10, ExpirationTime: 86400000 },
             "grok-3-deepersearch": { RequestFrequency: 3, ExpirationTime: 86400000 },
-            "grok-3-reasoning": { RequestFrequency: 10, ExpirationTime: 86400000 }
+            "grok-3-reasoning": { RequestFrequency: 10, ExpirationTime: 86400000 },
+            "grok-4": { RequestFrequency: 20, ExpirationTime: 7200000 }
         };
 
         let tokenMap = {};
@@ -364,12 +364,17 @@
         function calculateModelRemaining() {
             const modelRemaining = {};
             Object.keys(modelConfig).forEach(modelName => {
-                const maxRequests = modelConfig[modelName].RequestFrequency;
+                var maxRequests = modelConfig[modelName].RequestFrequency;
                 modelRemaining[modelName] = 0;
                 Object.values(tokenMap).forEach(tokenData => {
                     const modelData = tokenData[modelName];
-                    if (modelData.isValid) {
-                        modelRemaining[modelName] += maxRequests - modelData.totalRequestCount;
+                    if(modelData){
+                        if (!modelData.isSuper) {
+                            modelRemaining[modelName] = 0;
+                        }
+                        else if (modelData.isValid) {
+                            modelRemaining[modelName] += maxRequests - modelData.totalRequestCount;
+                        }
                     }
                 });
             });
@@ -385,7 +390,7 @@
             }
 
             const modelRemaining = calculateModelRemaining();
-            const modelIds = ['grok-2', 'grok-3', 'grok-3-deepsearch', 'grok-3-deepersearch', 'grok-3-reasoning'];
+            const modelIds = ['grok-3', 'grok-3-deepsearch', 'grok-3-deepersearch', 'grok-3-reasoning','grok-4'];
             modelIds.forEach(modelName => {
                 const countElement = document.getElementById(`${modelName}-count`);
                 if (countElement) {
@@ -404,7 +409,12 @@
             Object.values(tokenMap).forEach(tokenData => {
                 Object.entries(tokenData).forEach(([modelName, modelData]) => {
                     if (!modelData.isValid) {
-                        const recoveryTime = modelData.invalidatedTime + modelConfig[modelName].ExpirationTime;
+                        if(modelData.isSuper){
+                            ExpirationTime = 3 * 60 * 60 * 1000;
+                        }else{
+                            ExpirationTime = modelConfig[modelName].ExpirationTime;
+                        }
+                        const recoveryTime = modelData.invalidatedTime + ExpirationTime;
                         if (recoveryTime <= currentTime) {
                             shouldRefresh = true;
                         }
@@ -517,9 +527,30 @@
                 progressFill.className = 'progress-fill';
 
                 const modelData = tokenData[modelName];
-                const requestCount = modelData.totalRequestCount;
-                const maxRequests = config.RequestFrequency;
+                if(!modelData) return;
+                const isSuper = modelData.isSuper;
+                let requestCount = modelData.totalRequestCount;
+                let maxRequests = config.RequestFrequency;
+                if (isSuper) {
+                    switch (modelName) {
+                        case "grok-3":
+                            maxRequests = 100;
+                            break;
+                        case "grok-3-deepsearch":
+                            maxRequests = 30;
+                            break;
+                        case "grok-3-deepersearch":
+                            maxRequests = 10;
+                            break;
+                        case "grok-3-reasoning":
+                            maxRequests = 30;
+                            break;
+                        case "grok-4":
+                            maxRequests = 20;
+                    }
+                }
                 const percentage = Math.min((requestCount / maxRequests) * 100, 100);
+                
                 progressFill.style.width = `${percentage}%`;
                 progressFill.style.backgroundColor = getProgressColor(percentage, modelData.isValid);
                 progressBar.appendChild(progressFill);
@@ -531,13 +562,19 @@
                 const status = document.createElement('div');
                 status.className = 'status';
                 if (!modelData.isValid) {
+                    if(modelData.isSuper){
+                            ExpirationTime = 3 * 60 * 60 * 1000;
+                    }
+                    else{
+                            ExpirationTime = config.ExpirationTime;
+                    }
                     status.classList.add('status-expired');
                     status.textContent = '失效';
                     status.setAttribute('data-invalidated-time', modelData.invalidatedTime);
-                    status.setAttribute('data-expiration-time', config.ExpirationTime);
+                    status.setAttribute('data-expiration-time', ExpirationTime);
                     const tooltip = document.createElement('div');
                     tooltip.className = 'tooltip';
-                    tooltip.textContent = getTooltipText(modelData.invalidatedTime, config.ExpirationTime);
+                    tooltip.textContent = getTooltipText(modelData.invalidatedTime, ExpirationTime);
                     status.appendChild(tooltip);
                 } else {
                     status.classList.add('status-active');
@@ -566,8 +603,28 @@
             Object.entries(modelConfig).forEach(([modelName, config]) => {
                 const modelItem = modelItems[index++];
                 const modelData = tokenData[modelName];
-                const requestCount = modelData.totalRequestCount;
-                const maxRequests = config.RequestFrequency;
+                if(!modelData) return;
+                const isSuper = modelData.isSuper;
+                let requestCount = modelData.totalRequestCount;
+                let maxRequests = config.RequestFrequency;
+                if (isSuper) {
+                    switch (modelName) {
+                        case "grok-3":
+                            maxRequests = 100;
+                            break;
+                        case "grok-3-deepsearch":
+                            maxRequests = 30;
+                            break;
+                        case "grok-3-deepersearch":
+                            maxRequests = 10;
+                            break;
+                        case "grok-3-reasoning":
+                            maxRequests = 30;
+                            break;
+                        case "grok-4":
+                            maxRequests = 20;
+                    }
+                }
                 const percentage = Math.min((requestCount / maxRequests) * 100, 100);
 
                 const progressFill = modelItem.querySelector('.progress-fill');
@@ -580,13 +637,19 @@
                 const status = modelItem.querySelector('.status');
                 status.className = 'status';
                 if (!modelData.isValid) {
+                    if(modelData.isSuper){
+                            ExpirationTime = 3 * 60 * 60 * 1000;
+                    }
+                    else{
+                            ExpirationTime = config.ExpirationTime;
+                    }
                     status.classList.add('status-expired');
                     status.textContent = '失效';
                     status.setAttribute('data-invalidated-time', modelData.invalidatedTime);
-                    status.setAttribute('data-expiration-time', config.ExpirationTime);
+                    status.setAttribute('data-expiration-time', ExpirationTime);
                     const tooltip = status.querySelector('.tooltip') || document.createElement('div');
                     tooltip.className = 'tooltip';
-                    tooltip.textContent = getTooltipText(modelData.invalidatedTime, config.ExpirationTime);
+                    tooltip.textContent = getTooltipText(modelData.invalidatedTime, ExpirationTime);
                     if (!status.contains(tooltip)) status.appendChild(tooltip);
                 } else {
                     status.classList.add('status-active');
