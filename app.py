@@ -86,15 +86,16 @@ if not DATA_DIR.exists():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG = {
     "MODELS": {
-        'grok-2': 'grok-latest',
-        'grok-2-imageGen': 'grok-latest',
-        'grok-2-search': 'grok-latest',
         "grok-3": "grok-3",
         "grok-3-search": "grok-3",
         "grok-3-imageGen": "grok-3",
         "grok-3-deepsearch": "grok-3",
         "grok-3-deepersearch": "grok-3",
-        "grok-3-reasoning": "grok-3"
+        "grok-3-reasoning": "grok-3",
+        'grok-4': 'grok-4',
+        'grok-4-reasoning': 'grok-4',
+        'grok-4-imageGen': 'grok-4',
+        'grok-4-deepsearch': 'grok-4'
     },
     "API": {
         "IS_TEMP_CONVERSATION": os.environ.get("IS_TEMP_CONVERSATION", "true").lower() == "true",
@@ -121,11 +122,12 @@ CONFIG = {
         "MAX_ATTEMPTS": 2
     },
     "TOKEN_STATUS_FILE": str(DATA_DIR / "token_status.json"),
-    "SHOW_THINKING": os.environ.get("SHOW_THINKING") == "true",
+    "SHOW_THINKING": os.environ.get("SHOW_THINKING").lower() == "true",
     "IS_THINKING": False,
     "IS_IMG_GEN": False,
     "IS_IMG_GEN2": False,
-    "ISSHOW_SEARCH_RESULTS": os.environ.get("ISSHOW_SEARCH_RESULTS", "true").lower() == "true"
+    "ISSHOW_SEARCH_RESULTS": os.environ.get("ISSHOW_SEARCH_RESULTS", "true").lower() == "true",
+    "IS_SUPER_GROK": os.environ.get("IS_SUPER_GROK", "false").lower() == "true"
 }
 
 
@@ -145,7 +147,7 @@ DEFAULT_HEADERS = {
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
     'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c',
-    'x-statsig-id': 'ZTpUeXBlRXJyb3I6IENhbm5vdCByZWFkIHByb3BlcnRpZXMgb2YgdW5kZWZpbmVkIChyZWFkaW5nICdjaGlsZE5vZGVzJyk='# 暂用固定x-statsig-id，失效再看
+    'x-statsig-id': 'ZTpUeXBlRXJyb3I6IENhbm5vdCByZWFkIHByb3BlcnRpZXMgb2YgdW5kZWZpbmVkIChyZWFkaW5nICdjaGlsZE5vZGVzJyk='
 }
 
 class AuthTokenManager:
@@ -153,29 +155,47 @@ class AuthTokenManager:
         self.token_model_map = {}
         self.expired_tokens = set()
         self.token_status_map = {}
-
-        self.model_config = {
-            "grok-2": {
-                "RequestFrequency": 30,
-                "ExpirationTime": 1 * 60 * 60 * 1000  # 1小时
-            },
-            "grok-3": {
-                "RequestFrequency": 20,
-                "ExpirationTime": 2 * 60 * 60 * 1000  # 2小时
-            },
-            "grok-3-deepsearch": {
-                "RequestFrequency": 10,
-                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
-            },
-            "grok-3-deepersearch": {
-                "RequestFrequency": 3,
-                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
-            },
-            "grok-3-reasoning": {
-                "RequestFrequency": 10,
-                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
+        self.model_super_config = {
+                "grok-3": {
+                    "RequestFrequency": 100,
+                    "ExpirationTime": 3 * 60 * 60 * 1000  # 3小时
+                },
+                "grok-3-deepsearch": {
+                    "RequestFrequency": 30,
+                    "ExpirationTime": 24 * 60 * 60 * 1000  # 3小时
+                },
+                "grok-3-deepersearch": {
+                    "RequestFrequency": 10,
+                    "ExpirationTime": 3 * 60 * 60 * 1000  # 23小时
+                },
+                "grok-3-reasoning": {
+                    "RequestFrequency": 30,
+                    "ExpirationTime": 3 * 60 * 60 * 1000  # 3小时
+                },
+                "grok-4": {
+                    "RequestFrequency": 20,
+                    "ExpirationTime": 3 * 60 * 60 * 1000  # 3小时
+                }
             }
-        }
+        self.model_normal_config = {
+                "grok-3": {
+                    "RequestFrequency": 20,
+                    "ExpirationTime": 3 * 60 * 60 * 1000  # 3小时
+                },
+                "grok-3-deepsearch": {
+                    "RequestFrequency": 10,
+                    "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
+                },
+                "grok-3-deepersearch": {
+                    "RequestFrequency": 3,
+                    "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
+                },
+                "grok-3-reasoning": {
+                    "RequestFrequency": 8,
+                    "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
+                }
+            }
+        self.model_config = self.model_normal_config
         self.token_reset_switch = False
         self.token_reset_timer = None
         self.load_token_status() # 加载令牌状态
@@ -196,47 +216,67 @@ class AuthTokenManager:
                 logger.info("已从配置文件加载令牌状态", "TokenManager")
         except Exception as error:
             logger.error(f"加载令牌状态失败: {str(error)}", "TokenManager")
-    def add_token(self, token,isinitialization=False):
-        sso = token.split("sso=")[1].split(";")[0]
+    def add_token(self, tokens, isinitialization=False):
+        tokenType = tokens.get("type")
+        tokenSso = tokens.get("token")
+        if tokenType == "normal":
+            self.model_config = self.model_normal_config
+        else:
+            self.model_config = self.model_super_config
+        sso = tokenSso.split("sso=")[1].split(";")[0]
+
         for model in self.model_config.keys():
             if model not in self.token_model_map:
                 self.token_model_map[model] = []
             if sso not in self.token_status_map:
                 self.token_status_map[sso] = {}
 
-            existing_token_entry = next((entry for entry in self.token_model_map[model] if entry["token"] == token), None)
+            existing_token_entry = next((entry for entry in self.token_model_map[model] if entry["token"] == tokenSso), None)
 
             if not existing_token_entry:
                 self.token_model_map[model].append({
-                    "token": token,
+                    "token": tokenSso,
+                    "MaxRequestCount": self.model_config[model]["RequestFrequency"],
                     "RequestCount": 0,
                     "AddedTime": int(time.time() * 1000),
-                    "StartCallTime": None
+                    "StartCallTime": None,
+                    "type": tokenType
                 })
 
                 if model not in self.token_status_map[sso]:
                     self.token_status_map[sso][model] = {
                         "isValid": True,
                         "invalidatedTime": None,
-                        "totalRequestCount": 0
+                        "totalRequestCount": 0,
+                        "isSuper":tokenType == "super"
                     }
         if not isinitialization:
             self.save_token_status()
 
-    def set_token(self, token):
+    def set_token(self, tokens):
+        tokenType = tokens.get("type")
+        tokenSso = tokens.get("token")
+        if tokenType == "normal":
+            self.model_config = self.model_normal_config
+        else:
+            self.model_config = self.model_super_config
+
         models = list(self.model_config.keys())
         self.token_model_map = {model: [{
-            "token": token,
+            "token": tokenSso,
+            "MaxRequestCount": self.model_config[model]["RequestFrequency"],
             "RequestCount": 0,
             "AddedTime": int(time.time() * 1000),
-            "StartCallTime": None
+            "StartCallTime": None,
+            "type": tokenType
         }] for model in models}
 
-        sso = token.split("sso=")[1].split(";")[0]
+        sso = tokenSso.split("sso=")[1].split(";")[0]
         self.token_status_map[sso] = {model: {
             "isValid": True,
             "invalidatedTime": None,
-            "totalRequestCount": 0
+            "totalRequestCount": 0,
+            "isSuper":tokenType == "super"
         } for model in models}
 
     def delete_token(self, token):
@@ -308,7 +348,7 @@ class AuthTokenManager:
 
             token_entry["RequestCount"] += 1
 
-            if token_entry["RequestCount"] > self.model_config[normalized_model]["RequestFrequency"]:
+            if token_entry["RequestCount"] > token_entry["MaxRequestCount"]:
                 self.remove_token_from_model(normalized_model, token_entry["token"])
                 next_token_entry = self.token_model_map[normalized_model][0] if self.token_model_map[normalized_model] else None
                 return next_token_entry["token"] if next_token_entry else None
@@ -341,7 +381,8 @@ class AuthTokenManager:
             self.expired_tokens.add((
                 removed_token_entry["token"],
                 normalized_model,
-                int(time.time() * 1000)
+                int(time.time() * 1000),
+                removed_token_entry["type"]
             ))
 
             if not self.token_reset_switch:
@@ -358,7 +399,7 @@ class AuthTokenManager:
         return list(self.expired_tokens)
 
     def normalize_model_name(self, model):
-        if model.startswith('grok-') and 'deepsearch' not in model and 'reasoning' not in model:
+        if model.startswith('grok-') and not any(keyword in model for keyword in ['deepsearch','deepersearch','reasoning']):
             return '-'.join(model.split('-')[:2])
         return model
 
@@ -371,8 +412,8 @@ class AuthTokenManager:
 
         for model in self.model_config.keys():
             model_tokens = self.token_model_map.get(model, [])
-            model_request_frequency = self.model_config[model]["RequestFrequency"]
-
+            
+            model_request_frequency = sum(token_entry.get("MaxRequestCount", 0) for token_entry in model_tokens)
             total_used_requests = sum(token_entry.get("RequestCount", 0) for token_entry in model_tokens)
 
             remaining_capacity = (len(model_tokens) * model_request_frequency) - total_used_requests
@@ -388,10 +429,13 @@ class AuthTokenManager:
         def reset_expired_tokens():
             now = int(time.time() * 1000)
 
+            model_config = self.model_normal_config
             tokens_to_remove = set()
             for token_info in self.expired_tokens:
-                token, model, expired_time = token_info
-                expiration_time = self.model_config[model]["ExpirationTime"]
+                token, model, expired_time ,type = token_info
+                if type == "super":
+                    model_config = self.model_super_config
+                expiration_time = model_config[model]["ExpirationTime"]
 
                 if now - expired_time >= expiration_time:
                     if not any(entry["token"] == token for entry in self.token_model_map.get(model, [])):
@@ -400,9 +444,11 @@ class AuthTokenManager:
 
                         self.token_model_map[model].append({
                             "token": token,
+                            "MaxRequestCount": model_config[model]["RequestFrequency"],
                             "RequestCount": 0,
                             "AddedTime": now,
-                            "StartCallTime": None
+                            "StartCallTime": None,
+                            "type": type
                         })
 
                     sso = token.split("sso=")[1].split(";")[0]
@@ -410,12 +456,13 @@ class AuthTokenManager:
                         self.token_status_map[sso][model]["isValid"] = True
                         self.token_status_map[sso][model]["invalidatedTime"] = None
                         self.token_status_map[sso][model]["totalRequestCount"] = 0
+                        self.token_status_map[sso][model]["isSuper"] = type == "super"
 
                     tokens_to_remove.add(token_info)
 
             self.expired_tokens -= tokens_to_remove
 
-            for model in self.model_config.keys():
+            for model in model_config.keys():
                 if model not in self.token_model_map:
                     continue
 
@@ -423,13 +470,14 @@ class AuthTokenManager:
                     if not token_entry.get("StartCallTime"):
                         continue
 
-                    expiration_time = self.model_config[model]["ExpirationTime"]
+                    expiration_time = model_config[model]["ExpirationTime"]
                     if now - token_entry["StartCallTime"] >= expiration_time:
                         sso = token_entry["token"].split("sso=")[1].split(";")[0]
                         if sso in self.token_status_map and model in self.token_status_map[sso]:
                             self.token_status_map[sso][model]["isValid"] = True
                             self.token_status_map[sso][model]["invalidatedTime"] = None
                             self.token_status_map[sso][model]["totalRequestCount"] = 0
+                            self.token_status_map[sso][model]["isSuper"] = token_entry["type"] == "super"
 
                         token_entry["RequestCount"] = 0
                         token_entry["StartCallTime"] = None
@@ -632,14 +680,14 @@ class GrokApiClient:
     #         logger.error(str(error), "Server")
     #         raise ValueError(error)
     def prepare_chat_request(self, request):
-        if ((request["model"] == 'grok-2-imageGen' or request["model"] == 'grok-3-imageGen') and
+        if ((request["model"] == 'grok-4-imageGen' or request["model"] == 'grok-3-imageGen') and
             not CONFIG["API"]["PICGO_KEY"] and not CONFIG["API"]["TUMY_KEY"] and
             request.get("stream", False)):
             raise ValueError("该模型流式输出需要配置PICGO或者TUMY图床密钥!")
 
         # system_message, todo_messages = self.convert_system_messages(request["messages"]).values()
         todo_messages = request["messages"]
-        if request["model"] in ['grok-2-imageGen', 'grok-3-imageGen', 'grok-3-deepsearch']:
+        if request["model"] in ['grok-4-imageGen', 'grok-3-imageGen', 'grok-3-deepsearch']:
             last_message = todo_messages[-1]
             if last_message["role"] != 'user':
                 raise ValueError('此模型最后一条消息必须是用户消息!')
@@ -651,7 +699,7 @@ class GrokApiClient:
         message_length = 0
         convert_to_file = False
         last_message_content = ''
-        search = request["model"] in ['grok-2-search', 'grok-3-search']
+        search = request["model"] in ['grok-4-deepsearch', 'grok-3-search']
         deepsearchPreset = ''
         if request["model"] == 'grok-3-deepsearch':
             deepsearchPreset = 'default'
@@ -743,7 +791,7 @@ class GrokApiClient:
             "imageGenerationCount": 1,
             "forceConcise": False,
             "toolOverrides": {
-                "imageGen": request["model"] in ['grok-2-imageGen', 'grok-3-imageGen'],
+                "imageGen": request["model"] in ['grok-4-imageGen', 'grok-3-imageGen'],
                 "webSearch": search,
                 "xSearch": search,
                 "xMediaSearch": search,
@@ -800,17 +848,14 @@ def process_model_response(response, model):
         if response.get("cachedImageGenerationResponse") and not CONFIG["IS_IMG_GEN2"]:
             result["imageUrl"] = response["cachedImageGenerationResponse"]["imageUrl"]
         return result
-
-    if model == 'grok-2':
+    if model == 'grok-3':
         result["token"] = response.get("token")
-    elif model in ['grok-2-search', 'grok-3-search']:
+    elif model in ['grok-3-search']:
         if response.get("webSearchResults") and CONFIG["ISSHOW_SEARCH_RESULTS"]:
             result["token"] = f"\r\n<think>{Utils.organize_search_results(response['webSearchResults'])}</think>\r\n"
         else:
             result["token"] = response.get("token")
-    elif model == 'grok-3':
-        result["token"] = response.get("token")
-    elif model in ['grok-3-deepsearch', 'grok-3-deepersearch']:
+    elif model in ['grok-3-deepsearch', 'grok-3-deepersearch','grok-4-deepsearch']:
         if response.get("messageStepId") and not CONFIG["SHOW_THINKING"]:
             return result
         if response.get("messageStepId") and not CONFIG["IS_THINKING"]:
@@ -837,6 +882,37 @@ def process_model_response(response, model):
             CONFIG["IS_THINKING"] = False
         else:
             result["token"] = response.get("token")
+
+    elif model == 'grok-4':
+        if response.get("isThinking"):
+            return result
+        result["token"] = response.get("token")
+    elif model == 'grok-4-reasoning':
+        if response.get("isThinking") and not CONFIG["SHOW_THINKING"]:
+            return result
+        if response.get("isThinking") and not CONFIG["IS_THINKING"] and response.get("messageTag") == "assistant":
+            result["token"] = "<think>" + response.get("token", "")
+            CONFIG["IS_THINKING"] = True
+        elif not response.get("isThinking") and CONFIG["IS_THINKING"] and response.get("messageTag") == "final":
+            result["token"] = "</think>" + response.get("token", "")
+            CONFIG["IS_THINKING"] = False
+        else:
+            result["token"] = response.get("token")  
+    elif model in ['grok-4-deepsearch']:
+        if response.get("messageStepId") and not CONFIG["SHOW_THINKING"]:
+            return result
+        if response.get("messageStepId") and not CONFIG["IS_THINKING"] and response.get("messageTag") == "assistant":
+            result["token"] = "<think>" + response.get("token", "")
+            CONFIG["IS_THINKING"] = True
+        elif not response.get("messageStepId") and CONFIG["IS_THINKING"] and response.get("messageTag") == "final":
+            result["token"] = "</think>" + response.get("token", "")
+            CONFIG["IS_THINKING"] = False
+        elif (response.get("messageStepId") and CONFIG["IS_THINKING"] and response.get("messageTag") == "assistant") or response.get("messageTag") == "final":
+            result["token"] = response.get("token","")
+        elif (CONFIG["IS_THINKING"] and response.get("token","").get("action","") == "webSearch"):
+            result["token"] = response.get("token","").get("action_input","").get("query","")            
+        elif (CONFIG["IS_THINKING"] and response.get("webSearchResults")):
+            result["token"] = Utils.organize_search_results(response['webSearchResults'])      
 
     return result
 
@@ -1022,15 +1098,31 @@ def handle_stream_response(response, model):
 
 def initialization():
     sso_array = os.environ.get("SSO", "").split(',')
+    sso_array_super = os.environ.get("SSO_SUPER", "").split(',')
+
+    combined_dict = []
+    for value in sso_array_super:
+        combined_dict.append({
+            "token": f"sso-rw={value};sso={value}", 
+            "type": "super"
+        })
+    for value in sso_array:
+        combined_dict.append({
+            "token": f"sso-rw={value};sso={value}", 
+            "type": "normal"
+        })
+    
+
     logger.info("开始加载令牌", "Server")
     token_manager.load_token_status()
-    for sso in sso_array:
+    for sso in combined_dict:
         if sso:
-            token_manager.add_token(f"sso-rw={sso};sso={sso}",True)
+            token_manager.add_token(sso,True)
     token_manager.save_token_status()
 
     logger.info(f"成功加载令牌: {json.dumps(token_manager.get_all_tokens(), indent=2)}", "Server")
-    logger.info(f"令牌加载完成，共加载: {len(token_manager.get_all_tokens())}个令牌", "Server")
+    logger.info(f"令牌加载完成，共加载: {len(sso_array)+len(sso_array_super)}个令牌", "Server")
+    logger.info(f"其中共加载: {len(sso_array_super)}个super会员令牌", "Server")
 
     if CONFIG["API"]["PROXY"]:
         logger.info(f"代理已设置: {CONFIG['API']['PROXY']}", "Server")
@@ -1130,7 +1222,7 @@ def add_token():
 
     try:
         sso = request.json.get('sso')
-        token_manager.add_token(f"sso-rw={sso};sso={sso}")
+        token_manager.add_token({"token":f"sso-rw={sso.token};sso={sso.token}","type":sso.type})
         return jsonify(token_manager.get_token_status_map().get(sso, {})), 200
     except Exception as error:
         logger.error(str(error), "Server")
@@ -1202,6 +1294,8 @@ def chat_completions():
         retry_count = 0
         grok_client = GrokApiClient(model)
         request_payload = grok_client.prepare_chat_request(data)
+        logger.info(
+            f"当前令牌: {json.dumps(CONFIG['API']['SIGNATURE_COOKIE'], indent=2)}","Server")
         logger.info(json.dumps(request_payload,indent=2))
 
         while retry_count < CONFIG["RETRY"]["MAX_ATTEMPTS"]:
