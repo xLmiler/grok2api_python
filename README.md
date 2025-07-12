@@ -148,9 +148,10 @@ docker run -it -d --name grok2api \
 [GrokPythonService](https://huggingface.co/spaces/yxmiler/GrokPythonService)
 
 ### 可用模型列表
-- `grok-2`
-- `grok-2-imageGen`
-- `grok-2-search`
+- `grok-4`
+- `grok-4-reasoning`
+- `grok-4-imageGen`
+- `grok-2-deepersearch`
 - `grok-3`
 - `grok-3-search`
 - `grok-3-imageGen`
@@ -159,9 +160,9 @@ docker run -it -d --name grok2api \
 - `grok-3-reasoning`
 
 ### 模型可用次数参考
-- grok-2,grok-2-imageGen,grok-2-search 合计：30次  每1小时刷新
-- grok-3,grok-3-search,grok-3-imageGen 合计：20次  每2小时刷新
-- grok-3-deepsearch：10次 每24小时刷新
+- grok-4所有模型 合计一共：30次  每3小时刷新 仅grok会员可用
+- grok-3,grok-3-search,grok-3-imageGen 合计：20次  每3小时刷新
+- grok-3-deepsearch：8次 每24小时刷新
 - grok-3-deepersearch：3次 每24小时刷新
 - grok-3-reasoning：10次 每24小时刷新
 
